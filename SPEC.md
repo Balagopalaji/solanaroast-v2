@@ -231,7 +231,7 @@ It calls interfaces only — never imports Helius, Claude, or Upstash directly.
    → rateLimiter.check(ip) → reject 429 with funny message if exceeded
 
 3. Check cache
-   → cache.get(`${type}:${input}`) → return cached if hit (free, instant)
+   → cache.get(`roast:${type}:${normalizedInput}`) → return cached if hit (free, instant)
 
 4. Fetch target data
    → dataModules[type].fetchData(input) → RoastTargetData
@@ -240,7 +240,8 @@ It calls interfaces only — never imports Helius, Claude, or Upstash directly.
    → ai.generateRoast({ facts, templates, displayName }) → RoastOutput
 
 6. Store in cache
-   → cache.set(`${type}:${input}`, cachedRoast, 86400)
+   → cache.set(`roast:${type}:${normalizedInput}`, cachedRoast, 86400)
+   → cache.set(`roast:id:${roastId}`, cachedRoast, 86400)
    → cache.incrementHits(`hits:${type}:${input}`) // Wall of Shame counter
 
 7. Return response
@@ -259,7 +260,7 @@ API: Helius — `https://mainnet.helius-rpc.com/?api-key=<key>`
 
 Parallel calls:
 - `getAssetsByOwner` → tokens + NFTs with names, amounts, USD values, floor prices
-- `getEnhancedTransactionsForAddress` (limit 50) → parsed txns ("swapped SOL for BONK")
+- `getTransactionsForAddress` (limit 50) → wallet transaction history
 - `getBalance` → SOL balance
 
 Extracted as `RoastFact[]`:
@@ -270,8 +271,8 @@ Top Tokens:         "BONK (94% of portfolio)"       roastable: if meme coin > 50
 NFTs Held:          "3 NFTs, floor $0.001 each"     roastable: if floor is negligible
 Wallet Age:         "847 days old"                  roastable: if old but poor
 Last Active:        "8 months ago"                  roastable: always
-Biggest Loss:       "Bought WIF at $4.20, now $0.08" roastable: always
-Liquidations:       "Liquidated on Marginfi 2x"    roastable: always
+Biggest Loss:       "Bought WIF at $4.20, now $0.08" roastable: always, only when unambiguous
+Liquidations:       "Liquidated on Marginfi 2x"    roastable: always, only when unambiguous
 Transaction Count:  "1,247 transactions"            roastable: if high but poor
 ```
 
@@ -478,15 +479,22 @@ Only two things live in Vercel KV (Upstash):
 
 **1. Roast results**
 ```
-Key:   roast:{targetType}:{input}
+Key:   roast:{targetType}:{normalizedInput}
 Value: CachedRoast (JSON)
 TTL:   86400 seconds (24 hours)
 ```
 
-**2. Rate limit counters**
+**2. Roast lookup by share ID**
+```
+Key:   roast:id:{roastId}
+Value: CachedRoast (JSON)
+TTL:   86400 seconds (24 hours)
+```
+
+**3. Rate limit counters**
 Handled automatically by `@upstash/ratelimit`. No manual management needed.
 
-**3. Wall of Shame hit counters**
+**4. Wall of Shame hit counters**
 ```
 Key:   hits:{targetType}:{input}
 Value: number (incremented on each new roast, never expires)
@@ -655,21 +663,21 @@ solanaroast-v2/
 │   └── ErrorDialog.tsx                 # Win95 error box with roast-themed messages
 │
 ├── public/
-│   └── memes/                          # Static JPG templates (never generated)
-│       ├── this-is-fine.jpg
-│       ├── distracted-bf.jpg
-│       ├── not-stonks.jpg
-│       ├── coffin-dance.jpg
-│       ├── drake-no-yes.jpg
-│       ├── galaxy-brain.jpg
-│       ├── wojak-crying.jpg
-│       ├── nft-guy.jpg
-│       ├── wen-moon.jpg
-│       ├── surprised-pikachu.jpg
-│       ├── harold-pain.jpg
-│       ├── two-buttons.jpg
-│       ├── doge.jpg
-│       └── stonks.jpg
+│   └── memes/                          # Static original parody templates, never copied meme JPGs
+│       ├── this-is-fine.jpg            # commissioned/original derivative art
+│       ├── distracted-bf.jpg           # commissioned/original derivative art
+│       ├── not-stonks.jpg              # commissioned/original derivative art
+│       ├── coffin-dance.jpg            # commissioned/original derivative art
+│       ├── drake-no-yes.jpg            # commissioned/original derivative art
+│       ├── galaxy-brain.jpg            # commissioned/original derivative art
+│       ├── wojak-crying.jpg            # commissioned/original derivative art
+│       ├── nft-guy.jpg                 # commissioned/original derivative art
+│       ├── wen-moon.jpg                # commissioned/original derivative art
+│       ├── surprised-pikachu.jpg       # commissioned/original derivative art
+│       ├── harold-pain.jpg             # commissioned/original derivative art
+│       ├── two-buttons.jpg             # commissioned/original derivative art
+│       ├── doge.jpg                    # commissioned/original derivative art
+│       └── stonks.jpg                  # commissioned/original derivative art
 │
 ├── styles/
 │   └── globals.css                     # @import "98.css"; Tailwind directives
@@ -711,15 +719,15 @@ TWITTER_BOT_API_KEY=
 TWITTER_BOT_API_SECRET=
 
 # Cache + rate limiting (required)
-KV_REST_API_URL=            # from Vercel KV dashboard
-KV_REST_API_TOKEN=          # from Vercel KV dashboard
+UPSTASH_REDIS_REST_URL=     # from Vercel KV / Upstash dashboard
+UPSTASH_REDIS_REST_TOKEN=   # from Vercel KV / Upstash dashboard
 
 # App
 NEXT_PUBLIC_APP_URL=https://solanaroast.lol
 ```
 
 For v2.0, only 4 are required: `ANTHROPIC_API_KEY`, `HELIUS_API_KEY`,
-`HELIUS_RPC_URL`, `KV_REST_API_URL`, `KV_REST_API_TOKEN`.
+`HELIUS_RPC_URL`, `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`.
 
 ---
 
@@ -733,7 +741,7 @@ Each step has a clear interface contract and done criteria.
 **Step 1: Scaffold**
 - `npx create-next-app@latest solanaroast-v2 --typescript --tailwind --app`
 - Install: `98.css`, `@upstash/redis`, `@upstash/ratelimit`, `@vercel/og`,
-  `@anthropic-ai/sdk`, `@helius-labs/helius-sdk`
+  `@anthropic-ai/sdk`, `helius-sdk`
 - Create `modules/types.ts` with all interfaces from this spec
 - Create `modules/registry.ts` with empty module map
 - Create folder structure as specified
@@ -750,7 +758,7 @@ Each step has a clear interface contract and done criteria.
 
 **Sub-agent A: Wallet Data Module**
 - Implement `modules/data/wallet.ts` satisfying `DataModule` interface
-- Helius parallel calls: getAssetsByOwner, getEnhancedTransactions, getBalance
+- Helius parallel calls: getAssetsByOwner, getTransactionsForAddress, getBalance
 - Returns `RoastTargetData` with `RoastFact[]` as specified in this doc
 - Done: `WalletDataModule.fetchData('valid-address')` returns correct shape,
   tested against 5+ real mainnet wallets including one empty wallet
